@@ -1,5 +1,5 @@
 " visual_studio.vim - Visual Studio integration with Vim 
-" Author:               Henrik Ã–hman <speeph@gmail.com>
+" Author:               Henrik Öhman <speeph@gmail.com>
 " URL:                  http://github.com/spiiph/visual_studio/tree/master
 " Version:              2.0
 " LastChanged:          $LastChangeDate$
@@ -13,9 +13,13 @@
 " Copyright (c) 2003-2007 Michael Graz
 " mgraz.vim@plan10.com
 "
+" Version 1.2async Nov-10
+" Initial asynchronous building support
+" Thanks to the work of Max Dyckhoff
+"
 " Version 1.2 Sep-07
 " Support for multiple instances and startup projects
-" Thanks for the work of Henrik Ã–hman <spiiph@hotmail.com>
+" Thanks for the work of Henrik Öhman <spiiph@hotmail.com>
 "
 " Version 1.1 May-04
 " Support for compiling & building
@@ -33,12 +37,13 @@
 " - Rename s:visual_studio_xyz to s:xyz - no need for a prefix here.
 " * Break out commands, mappings and menu to its own file(s)
 " * Change to an autoload-structure for functions
+"
 
 " Load guards {{{1
 if exists('loaded_visual_studio')
     finish
 endif
-"let loaded_visual_studio = 1
+let loaded_visual_studio = 1
 
 " Only run on win32 and win64, not cygwin
 if !has("win32") && !has("win64")
@@ -96,15 +101,16 @@ call s:InitVariable("g:visual_studio_errorformat['cpp']",
 call s:InitVariable("g:visual_studio_errorformat['csharp']",
     \ '\ %#%f(%l\\\,%c):\ %m')
 call s:InitVariable("g:visual_studio_errorformat['find_results']",
-    \ "\ %#%f(%l):%m")
+    \ '\ %#%f(%l):%m')
 call s:InitVariable("g:visual_studio_errorformat_task_list",
     \ "%f(%l)\ %#:\ %#%m")
-call s:InitVariable("g:visual_studio_write_before_build", 1)
+call s:InitVariable("g:visual_studio_write_before_build", 0)
 call s:InitVariable("g:visual_studio_ignore_file_types",  "obj,lib,res")
 call s:InitVariable("g:visual_studio_menu", 1)
 call s:InitVariable("g:visual_studio_project_submenus", 1)
 call s:InitVariable("g:visual_studio_commands", 1)
 call s:InitVariable("g:visual_studio_mappings", 1)
+call s:InitVariable("g:visual_studio_asynchronous", 1)
 
 "----------------------------------------------------------------------
 " Local variables {{{2
@@ -116,28 +122,6 @@ call s:InitVariable("s:projects", [])
 call s:InitVariable("s:solution_index", -1)
 call s:InitVariable("s:project_index", -1)
 call s:InitVariable("s:output", $TEMP . '\vs_output.txt')
-
-"----------------------------------------------------------------------
-" Initialization {{{1
-
-"----------------------------------------------------------------------
-" Initialization function {{{2
-" Import visual_studio.py
-function! s:PythonInit()
-    if s:python_init
-        return
-    endif
-
-    python import sys
-    exe 'python sys.path.append(r"' . s:location . '")'
-    exe 'python import ' . s:module
-
-    let s:python_init = 1
-endfunction
-
-"----------------------------------------------------------------------
-" Plugin initialization {{{2
-call s:PythonInit()
 
 
 "----------------------------------------------------------------------
@@ -181,7 +165,18 @@ function! DTEReload()
     exe "python import " . s:module
     exe "python reload(" . s:module . ")"
     call s:DTEExec("set_current_dte", s:GetSolutionPID())
+    call s:DTEExec("set_asynchronous", g:visual_studio_asynchronous)
     echo s:module . ".py is reloaded."
+endfunction
+
+"----------------------------------------------------------------------
+" System functions {{{1
+
+"----------------------------------------------------------------------
+" Change the asynchronous nature of the script {{{2
+function! DTEAsynchronous(async)
+    g:visual_studio_asynchronous= a:async
+    call s:DTEExec("set_asynchronous", a:async)
 endfunction
 
 "----------------------------------------------------------------------
@@ -194,7 +189,7 @@ function! DTEGetFile()
     if &modified && !&hidden && !&autowriteall
         call s:DTEExec("get_file", "split")
     else
-        call s:DTEExec("get_file", "edit")
+        call s:DTEExec("get_file", "split")
     endif
 endfunction
 
@@ -302,6 +297,16 @@ function! DTETaskList()
     call s:DTEQuickfixOpen()
 endfunction
 
+
+"----------------------------------------------------------------------
+" Error list {{{2
+" Get the error list from Visual Studio 
+function! DTEErrorList()
+    call s:DTEExec("get_error_list", escape(s:output, '\'))
+    call s:DTELoadErrorFile("Error List")
+    call s:DTEQuickfixOpen()
+endfunction
+
 "----------------------------------------------------------------------
 " Output {{{2
 " Get the output from a build or compilation from Visual Studio
@@ -314,17 +319,26 @@ endfunction
 "----------------------------------------------------------------------
 " Find results {{{2
 " Get find results from Visual Studio
-function! DTEFindResults(which)
-    if a:which == 1
+function! DTEFindResults(results_location)
+    if a:results_location == 1
         call s:DTEExec("get_output", escape(s:output, '\'),
             \ "Find Results 1")
     else
         call s:DTEExec("get_output", escape(s:output, '\'),
             \ "Find Results 2")
     endif
-    s:DTELoadErrorFile("Find Results")
+    call s:DTELoadErrorFile("Find Results")
     call s:DTEQuickfixOpen()
 endfunction
+
+"----------------------------------------------------------------------
+" Find Text {{{2
+" Perform a text search in Visual Studio
+function! DTEFindText(results_location, whole_word, search_text)
+	echo "Searching for \"" . a:search_text . "\"..."
+	call s:DTEExec("find_text", a:results_location, a:whole_word, a:search_text) 
+	call DTEFindResults(a:results_location)
+endfunc
 
 "----------------------------------------------------------------------
 " Load error file {{{2
@@ -339,7 +353,7 @@ function! s:DTELoadErrorFile(type)
         exe "set errorformat=".
             \ g:visual_studio_errorformat["task_list"]
     elseif a:type == "Find Results"
-        exe "set errorformat+=".
+        exe "set errorformat=".
             \ g:visual_studio_errorformat["find_results"]
     else
         exe "set errorformat =". 
@@ -382,9 +396,13 @@ function! DTECompileFile()
         return
     endif
     call s:DTEExec("compile_file", escape(s:output, '\'))
-    call s:DTELoadErrorFile("Output")
-    call s:DTEQuickfixOpen()
-    echo "Done compiling."
+    if !g:visual_studio_asynchronous
+        call s:DTELoadErrorFile("Output")
+        call s:DTEQuickfixOpen()
+        echo "Done compiling."
+    else
+        echo "File compiling."
+    endif
 endfunction
 
 "----------------------------------------------------------------------
@@ -400,9 +418,13 @@ function! DTEBuildProject(...)
     else
         call s:DTEExec("build_project", escape(s:output, '\'))
     endif
-    call s:DTELoadErrorFile("Output")
-    call s:DTEQuickfixOpen()
-    echo "Done building project."
+    if !g:visual_studio_asynchronous
+        call s:DTELoadErrorFile("Output")
+        call s:DTEQuickfixOpen()
+        echo "Done building project."
+    else
+        echo "Project building."
+    endif
 endfunction
 
 "----------------------------------------------------------------------
@@ -414,9 +436,21 @@ function! DTEBuildSolution()
     endif
 
     call s:DTEExec("build_solution", escape(s:output, '\'))
-    call s:DTELoadErrorFile("Output")
-    call s:DTEQuickfixOpen()
-    echo "Done building solution."
+    if !g:visual_studio_asynchronous
+        call s:DTELoadErrorFile("Output")
+        call s:DTEQuickfixOpen()
+        echo "Done building solution."
+    else
+        echo "Solution building."
+    endif
+endfunction
+
+"----------------------------------------------------------------------
+" Cancel build {{{2
+" Cancel any in progress build.
+function! DTECancelBuild()
+    call s:DTEExec("cancel_build")
+	echo "Build canceled."
 endfunction
 
 "----------------------------------------------------------------------
@@ -860,7 +894,7 @@ endfunction
 
 function! DTEAbout()
     echo "visual_studio.vim version 1.2+"
-    echo "Customizations by Henrik Ã–hman <speeph@gmail.com>"
+    echo "Customizations by Henrik Öhman <speeph@gmail.com>"
     echo "git clone git://github.com/spiiph/visual_studio/tree/master"
     call input("Press <Enter> to continue ...")
 endfunction
@@ -901,10 +935,12 @@ endif
 nnoremap <silent> <Plug>VSGetFile :call DTEGetFile()<CR>
 nnoremap <silent> <Plug>VSPutFile :call DTEPutFile()<CR>
 nnoremap <silent> <Plug>VSTaskList :call DTETaskList()<CR>
+nnoremap <silent> <Plug>VSErrorList :call DTEErrorList()<CR>
 nnoremap <silent> <Plug>VSOutput :call DTEOutput()<CR>
 nnoremap <silent> <Plug>VSFindResults1 :call DTEFindResults(1)<CR>
 nnoremap <silent> <Plug>VSFindResults2 :call DTEFindResults(2)<CR>
 nnoremap <silent> <Plug>VSBuildSolution :call DTEBuildSolution()<CR>
+nnoremap <silent> <Plug>VSCancelBuild :call DTECancelBuild()<CR>
 nnoremap <silent> <Plug>VSBuildProject :call DTEBuildProject()<CR>
 nnoremap <silent> <Plug>VSCompileFile :call DTECompileFile()<CR>
 nnoremap <silent> <Plug>VSSelectSolution :call DTESelectSolution()<CR>
@@ -913,25 +949,29 @@ nnoremap <silent> <Plug>VSListFiles :call DTEListFiles()<CR>
 nnoremap <silent> <Plug>VSGetFiles :call DTEGetFiles()<CR>
 nnoremap <silent> <Plug>VSAbout :call DTEAbout()<CR>
 nnoremap <silent> <Plug>VSOnline :call DTEOnline()<CR>
+nnoremap <silent> <Plug>VSFindText :call DTEFindText(1, 1, expand("<cword>"))<CR>
 
 "----------------------------------------------------------------------
 " Default mappings {{{2
 if g:visual_studio_mappings
     nmap <silent> <Leader>vg <Plug>VSGetFile
     nmap <silent> <Leader>vp <Plug>VSPutFile
-    nmap <silent> <Leader>vt <Plug>VSTaskList
+"    nmap <silent> <Leader>vt <Plug>VSTaskList
+    nmap <silent> <Leader>ve <Plug>VSErrorList
     nmap <silent> <Leader>vo <Plug>VSOutput
-    nmap <silent> <Leader>vf <Plug>VSFindResults1
+	nmap <silent> <Leader>vf <Plug>VSFindText
+    nmap <silent> <Leader>v1 <Plug>VSFindResults1
     nmap <silent> <Leader>v2 <Plug>VSFindResults2
     nmap <silent> <Leader>vb <Plug>VSBuildSolution
-    nmap <silent> <Leader>vu <Plug>VSBuildProject
+    nmap <silent> <Leader>vx <Plug>VSCancelBuild
+"    nmap <silent> <Leader>vu <Plug>VSBuildProject
     nmap <silent> <Leader>vc <Plug>VSCompileFile
-    nmap <silent> <Leader>vs <Plug>VSSelectSolution
-    nmap <silent> <Leader>vj <Plug>VSSelectProject
-    nmap <silent> <Leader>vl <Plug>VSListFiles
-    nmap <silent> <Leader>ve <Plug>VSGetFiles
-    nmap <silent> <Leader>va <Plug>VSAbout
-    nmap <silent> <Leader>vh <Plug>VSOnline
+"    nmap <silent> <Leader>vs <Plug>VSSelectSolution
+"    nmap <silent> <Leader>vj <Plug>VSSelectProject
+"    nmap <silent> <Leader>vl <Plug>VSListFiles
+"    nmap <silent> <Leader>ve <Plug>VSGetFiles
+"    nmap <silent> <Leader>va <Plug>VSAbout
+"    nmap <silent> <Leader>vh <Plug>VSOnline
 endif
 
 "----------------------------------------------------------------------
@@ -943,6 +983,7 @@ if g:visual_studio_commands
     com! DTEFindResults1 call DTEFindResults(1)
     com! DTEFindResults2 call DTEFindResults(2)
     com! DTEBuildSolution call DTEBuildSolution()
+    com! DTECancelBuild call DTECancelBuild()
     com! -nargs=* -complete=customlist,s:CompleteProject
         \ DTEBuildProject call DTEBuildProject(<f-args>)
     com! -nargs=* -complete=customlist,s:CompleteProject
@@ -959,6 +1000,34 @@ if g:visual_studio_commands
     com! DTEAbout call DTEAbout()
     com! DTEOnline call DTEOnline()
     com! DTEReload call DTEReload()
+    com! DTEAsynchronous call DTEAsynchronous(1)
+    com! DTESynchronous call DTEAsynchronous(0)
+    com! -nargs=1
+        \ DTEFindText call DTEFindText(1, 0, <f-args>)
 endif
+
+"----------------------------------------------------------------------
+" Initialization {{{1
+
+"----------------------------------------------------------------------
+" Initialization function {{{2
+" Import visual_studio.py
+function! s:PythonInit()
+    if s:python_init
+        return
+    endif
+
+    python import sys
+    exe 'python sys.path.append(r"' . s:location . '")'
+    exe 'python import ' . s:module
+
+    call s:DTEExec("set_asynchronous", g:visual_studio_asynchronous)
+
+    let s:python_init = 1
+endfunction
+
+"----------------------------------------------------------------------
+" Plugin initialization {{{2
+call s:PythonInit()
 
 " vim: set sts=4 sw=4 fdm=marker:

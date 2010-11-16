@@ -158,6 +158,14 @@ class DTEWrapper:
             return None
 
     ############################################################ {{{2
+    def set_asynchronous(self, async):
+        '''Set the script to run asynchronously (or not).'''
+        
+        log_func()
+        
+        self.async = async
+
+    ############################################################ {{{2
     def update_dtes(self):
         '''Populate the self.dtes dict with {pid: dte} elements from the
         Running Object Table.'''
@@ -268,16 +276,16 @@ class DTEWrapper:
             projects = [p for p in projects if p.Name == project_name]
 
         for p in projects:
-            tool = p.Object.Configurations.Item(
-                    self.active_configuration.Name).Tools.Item(
+            VimExt.echomsg("Setting full paths for %s" % p.Name)
+            tool = p.ConfigurationManager.ActiveConfiguration.Tools.Item(
                             "VCCLCompilerTool")
 
-            if tool is not None:
-                #self.use_full_paths[p.Name] = tool.UseFullPaths
-                tool.UseFullPaths = True
-            else:
-                logging.debug("%s: tool is None for project %s" %
-                        (func_name(), p.Name))
+#            if tool is not None:
+#                #self.use_full_paths[p.Name] = tool.UseFullPaths
+#                tool.UseFullPaths = True
+#            else:
+#                logging.debug("%s: tool is None for project %s" %
+#                        (func_name(), p.Name))
 
     ############################################################ {{{2
     def reset_use_full_paths(self, project_name = None):
@@ -338,21 +346,45 @@ class DTEWrapper:
 
         try:
             window = self.dte.Windows.Item(caption)
-        except pywintypes.com_error, e:
+        except e:
             logging.exception(e)
             VimExt.echomsg("Error: window not active (%s)" % caption)
             return
 
         if caption == "Output":
-            sel = window.Object.OutputWindowPanes.Item("Build").\
-                TextDocument.Selection
+            sel = window.Object.OutputWindowPanes.Item("Build").TextDocument.Selection
         else:
             sel = window.Selection
+
         sel.SelectAll()
         f = file(output_file, "w")
         f.write(sel.Text.replace('\r', ''))
         f.close()
         sel.Collapse()
+
+    ############################################################ {{{2
+    def find_text(self, results_location, whole_word, search_text):
+        '''Search for some text.'''
+
+        log_func()
+
+        if self.dte is None:
+            return
+
+        try:
+            find = self.dte.Find
+            find.FindWhat = search_text
+            find.Action = 2				#vsFindAction.vsFindActionFindAll
+            find.Target = 6				#vsFindTarget.vsFindTargetSolution
+            find.MatchWholeWord = whole_word
+            find.ResultsLocation = results_location
+            find.WaitForFindToComplete= True
+            find.Execute()
+        except Exception, e:
+            logging.exception(e)
+            VimExt.exception(e, sys.exc_traceback)
+            VimExt.activate()
+            return
 
     ############################################################ {{{2
     def compile_file(self, output_file):
@@ -365,9 +397,12 @@ class DTEWrapper:
 
         try:
             self.dte.ExecuteCommand("Build.Compile")
-            # Wait for build to complete
-            self.wait_for_build()
-            self.get_output(output_file, "Output")
+
+            if not self.async:
+                # Wait for build to complete
+                self.wait_for_build()
+                self.get_output(output_file, "Output")
+
             VimExt.activate()
         except Exception, e:
             logging.exception(e)
@@ -397,19 +432,22 @@ class DTEWrapper:
             logging.info(("%s: config = %s, unique name = %s") %
                     (func_name(), config.Name, project.UniqueName))
 
-            self.set_use_full_paths(project.Name)
+#            self.set_use_full_paths(project.Name)
             config.Build()
-            # Wait for build to complete
-            self.wait_for_build()
-            self.get_output(output_file, "Output")
+
+            if not self.async:
+                # Wait for build to complete
+                self.wait_for_build()
+                self.get_output(output_file, "Output")
+
             VimExt.activate()
         except Exception, e:
             logging.exception(e)
             VimExt.exception(e, sys.exc_traceback)
             VimExt.activate()
             return
-        finally:
-            self.reset_use_full_paths(project.Name)
+#        finally:
+#            self.reset_use_full_paths(project.Name)
 
     ############################################################ {{{2
     def build_solution(self, output_file):
@@ -420,25 +458,44 @@ class DTEWrapper:
         if self.dte is None:
             return
 
-        if has_csharp_projects():
+        if self.has_csharp_projects():
             self.dte.Documents.CloseAll()
         self.set_autoload()
         self.activate()
 
         try:
-            self.set_use_full_paths()
-            self.solution_build.Build(1)
-            # Wait for build to complete
-            self.wait_for_build()
-            self.get_output(output_file, "Output")
+#            self.set_use_full_paths()
+            self.solution_build.Build(not self.async)
+
+            if not self.async:
+                # Wait for build to complete
+                self.wait_for_build()
+                self.get_output(output_file, "Output")
+
             VimExt.activate()
         except Exception, e:
             logging.exception(e)
             VimExt.exception(e, sys.exc_traceback)
             VimExt.activate()
             return
-        finally:
-            self.reset_use_full_paths()
+#        finally:
+#            self.reset_use_full_paths()
+
+    ############################################################ {{{2
+    def cancel_build(self):
+        '''Cancel the current build.'''
+
+        log_func()
+
+        if self.dte is None:
+            return
+
+        try:
+            self.dte.ExecuteCommand("Build.Cancel")
+        except Exception, e:
+            logging.exception(e)
+            VimExt.exception(e, sys.exc_traceback)
+            return
 
     ############################################################ {{{2
     def set_startup_project(self, project_name):
@@ -628,6 +685,53 @@ class DTEWrapper:
         return files
 
     ############################################################ {{{2
+    def get_error_list(self, output_file):
+        '''Retrieves the error list from Visual Studio.'''
+
+        log_func()
+
+        if self.dte is None:
+            return
+
+        self.dte.ExecuteCommand("View.ErrorList")
+        error_list_window = None
+        for window in self.dte.Windows:
+            if str(window.Caption).startswith("Error List"):
+                error_list_window = window
+        if error_list_window is None:
+            VimExt.echomsg("Error: Error List window not active")
+            return
+
+        f = file(output_file, "w")
+
+        for item_index in range(1, error_list_window.Object.ErrorItems.Count+1):
+
+            item = error_list_window.Object.ErrorItems.Item(item_index)
+
+            try:
+                filename = item.FileName
+            except Exception, e:
+                logging.exception(e)
+                filename = "<no-filename>"
+
+            try:
+                line = item.Line
+            except Exception, e:
+                logging.exception(e)
+                line = "<no-line>"
+
+            try:
+                description = item.Description
+            except Exception, e:
+                logging.exception(e)
+                description = "<no-description>"
+
+            f.write("%s(%s) : %s\n" % (filename, line, description))
+
+        f.close()
+
+
+    ############################################################ {{{2
     def get_task_list(self, output_file):
         '''Retrieves the task list from Visual Studio.'''
 
@@ -644,7 +748,8 @@ class DTEWrapper:
         if task_list_window is None:
             VimExt.echomsg("Error: Task List window not active")
             return
-        #task_list = task_list_window.Object
+
+        f = file(output_file, "w")
 
         for item in task_list_window.Object.TaskItems:
             try:
@@ -665,7 +770,8 @@ class DTEWrapper:
                 logging.exception(e)
                 description = "<no-description>"
 
-            f.write("%s(%s) : %s" % (filename, line, description))
+            f.write("%s(%s) : %s\n" % (filename, line, description))
+
         f.close()
 
 ############################################################ {{{1
@@ -715,8 +821,10 @@ class VimExt:
             except Exception, e:
                 logging.exception(e)
                 msg = None
+                VimExt.echomsg("Ohshit")
         else:
             msg = e
+
         if msg is None:
             msg = "Encountered unknown exception"
         VimExt.echomsg("Error: %s" % msg)
@@ -770,6 +878,7 @@ def dte_execute(name, *args):
 ############################################################ {{{2
 # Global helper functions
 import inspect
+
 def func_name():
     return inspect.stack()[1][3]
 
@@ -784,22 +893,20 @@ def log_func():
     func_name = frame[3]
 
     # convert argument dict to a comma separated string
-    arg_info = inspect.getargvalues(frame[0])
+    args,varargs,varkw,locals = inspect.getargvalues(frame[0])
 
     # remove 'self' argument
-    if 'self' in arg_info.args:
-        arg_info.args.remove('self')
-        del arg_info.locals['self']
+    if 'self' in args:
+        args.remove('self')
 
     # remove 'cls' argument
-    if 'cls' in arg_info.args:
-        arg_info.args.remove('cls')
-        del arg_info.locals['cls']
+    if 'cls' in args:
+        args.remove('cls')
 
     # format the args
-    args = inspect.formatargvalues(*arg_info)
+    format_args = inspect.formatargvalues(args,varargs,varkw,locals)
 
-    logging.info("%s%s" % (func_name, args))
+    logging.info("%s%s" % (func_name, format_args))
 
 # vim: set sts=4 sw=4 fdm=marker:
 # vim: fdt=v\:folddashes\ .\ "\ "\ .\ substitute(getline(v\:foldstart+1),\ '^\\s\\+\\|#\\s*\\|\:',\ '',\ 'g'):
